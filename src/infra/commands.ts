@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
+import { unsupportedUserIdentity } from '../../scripts/feishu-identity.mjs'
 import type { Deployment } from '../deployment.ts'
 
 const exec = promisify(execFile)
@@ -12,7 +13,14 @@ const TIMEOUT_MS = 90_000
  * Source channels and pollers inspect its code to distinguish deleted conversations from retryable failures.
  */
 export class CliError extends Error {
-  constructor(message: string, readonly code?: number, readonly exitCode?: number) { super(message) }
+  constructor(message: string, readonly code?: number, readonly exitCode?: number, readonly unsupportedUserIdentity = false) { super(message) }
+}
+interface FeishuFailure {
+  type?: string; subtype?: string; code?: number; message?: string; params?: { name?: string }[]
+}
+/** Only the CLI's pre-request identity validation permits replaying a read as the bot. */
+function feishuError(error: FeishuFailure, exitCode?: number): CliError {
+  return new CliError(`${error.message ?? 'Feishu command failed'}${error.code ? ` (${error.code})` : ''}`, error.code, exitCode, unsupportedUserIdentity(error))
 }
 /** Extracts a sanitized error from a failed subprocess without echoing argv, which may contain message text. */
 export function commandError(error: unknown, program = 'command'): Error {
@@ -20,11 +28,10 @@ export function commandError(error: unknown, program = 'command'): Error {
   const exitCode = error && typeof error === 'object' && 'code' in error && typeof error.code === 'number' ? error.code : undefined
   if (error && typeof error === 'object' && 'stderr' in error && typeof error.stderr === 'string') {
     const stderr = error.stderr.trim()
-    let parsed: { error?: { code?: number; message?: string } } | undefined
+    let parsed: { error?: FeishuFailure } | undefined
     try { parsed = JSON.parse(stderr.slice(stderr.indexOf('{'))) as typeof parsed }
     catch { /* Non-JSON CLI diagnostics are retained below. */ }
-    const code = parsed?.error?.code
-    if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode)
+    if (parsed?.error?.message) return feishuError(parsed.error, exitCode)
     // `gh` exits non-zero on HTTP errors (such as `gh: Not Found (HTTP 404)`) and on `gh: HTTP 304`, which ETag polling relies on.
     if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode)
   }
@@ -51,6 +58,13 @@ function membership(error: unknown): unknown {
   if (!(error instanceof CliError) || error.code !== 232011) return error
   const hint = 'The Feishu bot is not a member of the chat. Add the bot in the chat settings, then retry.'
   return new CliError(hint, error.code, error.exitCode)
+}
+/** Keep writes, event subscriptions, and unclassified shortcuts on the bot identity. */
+function feishuRead(args: readonly string[]): boolean {
+  return (args[0] === 'api' && args[1] === 'GET') || (args[0] === 'im' && [
+    '+chat-list', '+chat-members-list', '+chat-messages-list', '+messages-mget',
+    '+threads-messages-list', '+messages-resources-download',
+  ].includes(args[1] ?? ''))
 }
 /**
  * Executes gh, lark-cli, and git subprocesses with deployment account credentials, timeouts, and abort signals.
@@ -97,18 +111,29 @@ export class Commands {
     return path ? `repos/${this.repository}/${path}` : `repos/${this.repository}`
   }
   /**
-   * Runs the Feishu bot's `lark-cli` and returns the JSON `data` payload.
-   * @throws CliError with Feishu's error code on failure (rewriting 232011 when the bot is not in the chat).
+   * Reads prefer an explicitly configured user CLI. Writes and subscriptions remain bot operations.
+   * Only an explicit pre-request unsupported-user validation falls back to the bot, once.
+   * @throws CliError for missing authorization, API failures, or an unsupported bot fallback.
    */
   async lark<T>(args: string[], cwd?: string): Promise<T> {
     const bot = this.deployment.feishu
     if (!bot) throw new Error('The Feishu Source has no working bot CLI')
-    const output = await this.run(bot.cli, [...args, '--as', 'bot', '--format', 'json'], cwd)
-      .catch((error: unknown) => { throw membership(error) })
-    const result = JSON.parse(output) as { ok: boolean; data: T; error?: { code?: number; message?: string } }
-    const code = result.error?.code
-    if (!result.ok) throw membership(new CliError(`${result.error?.message ?? 'Feishu command failed'}${code ? ` (${code})` : ''}`, code))
-    return result.data
+    const userCli = Object.hasOwn(this.environment, 'DSH_SUPERAGENT_FEISHU_USER_CLI')
+      ? this.environment.DSH_SUPERAGENT_FEISHU_USER_CLI : process.env.DSH_SUPERAGENT_FEISHU_USER_CLI
+    const invoke = async (cli: string, identity: 'user' | 'bot'): Promise<T> => {
+      const output = await this.run(cli, [...args, '--as', identity, '--format', 'json'], cwd)
+      const result = JSON.parse(output) as { ok: boolean; data: T; error?: FeishuFailure }
+      if (!result.ok) throw feishuError(result.error ?? {})
+      return result.data
+    }
+    if (userCli && feishuRead(args)) {
+      try { return await invoke(userCli, 'user') }
+      catch (error) {
+        // A permission/token/network error is not evidence that the interface lacks user support.
+        if (!(error instanceof CliError) || !error.unsupportedUserIdentity) throw error
+      }
+    }
+    return invoke(bot.cli, 'bot').catch((error: unknown) => { throw membership(error) })
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }

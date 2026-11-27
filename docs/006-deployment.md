@@ -64,9 +64,21 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    The first command reads the app secret from standard input. Use a separate configuration directory: `lark-cli` allows one profile per app id, and your personal configuration may already contain a user login for that app.
 
-   The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
+   The host refuses a Source CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
+
+### Optional delegated user identity
+
+Set `DSH_SUPERAGENT_FEISHU_USER_CLI` in the host process environment to an absolute executable path for a separate, already-authorized user CLI wrapper, then restart the host. Use the same Feishu app and tenant as the bot, with a separate configuration directory. The wrapper must execute the real CLI, not the worker's `lark-cli` shim. Recursive shim paths are rejected. Do not change the Source's bot-only CLI or its strict mode.
+
+The host prefers `--as user` for raw `api GET` calls and these IM read shortcuts: `+chat-list`, `+chat-members-list`, `+chat-messages-list`, `+messages-mget`, `+threads-messages-list`, and `+messages-resources-download`. Its writes, message sends/replies, event subscriptions, and unclassified shortcuts still use the bot. With no user wrapper configured, host and worker behavior stays bot-only.
+
+The generated worker `lark-cli` shim also uses the configured user wrapper by default, so direct worker commands such as `lark-cli docs +fetch` use user identity. Message sends/replies, forwarding/editing/deleting messages, raw message-write endpoints, and event subscriptions are pinned to the bot even if `--as user` is supplied. An explicit `--as bot` remains available for other operations. CLI control commands such as `auth status`, `schema`, and `skills` use the user wrapper without injecting an unsupported `--as` flag. Existing authorization and command confirmation requirements still apply; the router does not complete consent automatically.
+
+A user operation falls back to the bot once only when the CLI explicitly rejects `--as user` as an unsupported identity before making a request. Missing scopes, missing/expired user authorization, strict-mode restrictions, API errors, and network failures are reported without changing identity. The worker router preserves arguments, stdin, stdout, stderr and the final exit status, buffering at most 64 KiB of stderr before deciding whether a pre-request validation can be discarded. Once stdout has been emitted or that buffer is exceeded, it will not replay the operation. Raw API errors cannot reliably distinguish unsupported identity from invalid credentials, so they do not trigger fallback. If the bot attempt also fails, its error is returned; this does not necessarily mean neither identity supports the interface.
+
+First-time user consent, additional scopes, and consent revoked by the user still require the normal Feishu authorization flow. This option neither performs login nor grants another application access. Updated prompt guidance tells workers to omit `--as` when delegation is configured; sessions retaining older prompt snapshots may still explicitly select bot identity until refreshed.
 
 ## Install
 
@@ -221,7 +233,7 @@ Setup verifies the GitHub repository and the agent's push access, writes the wor
 
 The process environment that setup writes:
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI by default, or the delegated identity router when `DSH_SUPERAGENT_FEISHU_USER_CLI` is configured; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
 - **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
 
 A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
