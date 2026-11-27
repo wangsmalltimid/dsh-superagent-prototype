@@ -25,7 +25,10 @@
     "locale/*.json",
     "README.md",
     "prompts",
-    "skills"
+    "skills",
+    "scripts/feishu-cli.mjs",
+    "scripts/feishu-identity.mjs",
+    "scripts/feishu-identity.d.mts"
   ],
   "dsh": {
     "bundle": {

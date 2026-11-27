@@ -5,7 +5,10 @@ It leaves other context reads and local downloads to workers, routes tickets and
 Do not alter remote state, authorization, or configuration while reading.
 Use gh for every GitHub call; specify --repo or an explicit API path.
 The watcher remains limited to the deployment's repository; linked context may be read elsewhere.
-Feishu uses --as bot; unavailable content does not authorize switching to the user's identity.
+Feishu messages are sent by the bot, and event subscriptions keep the bot identity.
+When DSH_SUPERAGENT_FEISHU_USER_CLI is configured, invoke lark-cli without --as: the worker shim prefers the delegated user identity and falls back once only when the CLI explicitly reports that the interface does not support user identity.
+Missing authorization, permissions, expired tokens, and network failures are not unsupported-interface errors; report them rather than retrying with another identity.
+Without that configured user CLI, Feishu uses --as bot; unavailable content does not authorize switching to an unconfigured user's identity.
 Start with lark-cli <domain> --help, schema <service.resource.method>, or skills read lark-im.
 Follow root_id, parent_id, thread_id, forwarded message IDs and document URLs recursively as relevant, tracking visited IDs.
 im +messages-mget expands merged forwards; im +threads-messages-list pages replies.

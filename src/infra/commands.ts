@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
+import { unsupportedUserIdentity } from '../../scripts/feishu-identity.mjs'
 import type { Deployment } from '../deployment.ts'
 
 const exec = promisify(execFile)
@@ -19,10 +20,7 @@ interface FeishuFailure {
 }
 /** Only the CLI's pre-request identity validation permits replaying a read as the bot. */
 function feishuError(error: FeishuFailure, exitCode?: number): CliError {
-  const unsupported = error.type === 'validation' && error.subtype === 'invalid_argument'
-    && error.params?.some(param => param.name === '--as') === true
-    && error.message === '--as user is not supported, this command only supports: bot'
-  return new CliError(`${error.message ?? 'Feishu command failed'}${error.code ? ` (${error.code})` : ''}`, error.code, exitCode, unsupported)
+  return new CliError(`${error.message ?? 'Feishu command failed'}${error.code ? ` (${error.code})` : ''}`, error.code, exitCode, unsupportedUserIdentity(error))
 }
 /** Extracts a sanitized error from a failed subprocess without echoing argv, which may contain message text. */
 export function commandError(error: unknown, program = 'command'): Error {
