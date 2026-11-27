@@ -60,6 +60,86 @@ describe('account-isolated operations', () => {
   })
 })
 
+describe('Feishu user-first reads', () => {
+  const env = { DSH_SUPERAGENT_FEISHU_USER_CLI: '/path/user-lark' }
+  const success = '{"ok":true,"data":{"value":1}}'
+  const unsupported = { type: 'validation', subtype: 'invalid_argument', params: [{ name: '--as' }],
+    message: '--as user is not supported, this command only supports: bot' }
+  it('prefers user credentials for host reads, including history, chat lists and resource downloads', async () => {
+    const commands = new Commands(() => deployment, env, new AbortController().signal)
+    const run = vi.spyOn(commands, 'run').mockResolvedValue(success)
+    for (const args of [
+      ['api', 'GET', '/open-apis/im/v1/messages'], ['im', '+messages-mget'],
+      ['im', '+threads-messages-list'], ['im', '+chat-list'], ['im', '+chat-members-list'],
+      ['im', '+chat-messages-list'], ['im', '+messages-resources-download'],
+    ]) {
+      expect(await commands.lark(args, '/work')).toEqual({ value: 1 })
+      expect(run).toHaveBeenLastCalledWith('/path/user-lark', [...args, '--as', 'user', '--format', 'json'], '/work')
+    }
+  })
+  it('keeps sends, replies, writes, subscriptions and unclassified commands on the bot', async () => {
+    const commands = new Commands(() => deployment, env, new AbortController().signal)
+    const run = vi.spyOn(commands, 'run').mockResolvedValue(success)
+    for (const args of [
+      ['im', '+messages-send'], ['im', '+messages-reply'],
+      ['api', 'POST', '/open-apis/im/v1/messages'], ['event', 'consume', 'im.message.receive_v1'],
+      ['im', '+chat-update'], ['im', 'unknown-command'],
+    ]) {
+      await commands.lark(args)
+      expect(run).toHaveBeenLastCalledWith(deployment.feishu!.cli, [...args, '--as', 'bot', '--format', 'json'], undefined)
+    }
+  })
+  it('falls back exactly once on explicit unsupported-user validation in stderr or stdout', async () => {
+    for (const channel of ['stderr', 'stdout']) {
+      const commands = new Commands(() => deployment, env, new AbortController().signal)
+      const run = vi.spyOn(commands, 'run')
+      if (channel === 'stderr') run.mockRejectedValueOnce(commandError({ code: 2, stderr: JSON.stringify({ error: unsupported }) }))
+      else run.mockResolvedValueOnce(JSON.stringify({ ok: false, error: unsupported }))
+      run.mockResolvedValueOnce(success)
+      expect(await commands.lark(['im', '+chat-list'])).toEqual({ value: 1 })
+      expect(run.mock.calls.map(call => call[0])).toEqual(['/path/user-lark', deployment.feishu!.cli])
+    }
+  })
+  it('does not treat authorization, login, token, strict-mode or network failures as unsupported interfaces', async () => {
+    for (const error of [
+      { type: 'authorization', subtype: 'permission_denied', code: 230027, message: 'access denied' },
+      { type: 'authentication', subtype: 'token_invalid', code: 99991668, message: 'token invalid' },
+      { type: 'authentication', subtype: 'user_unauthorized', message: 'login required' },
+      { type: 'validation', subtype: 'command_denied', message: 'strict mode bot' },
+      { ...unsupported, params: [{ name: '--chat-id' }] },
+      { ...unsupported, type: 'api' },
+    ]) {
+      const commands = new Commands(() => deployment, env, new AbortController().signal)
+      const failure = commandError({ code: 3, stderr: JSON.stringify({ error }) })
+      const run = vi.spyOn(commands, 'run').mockRejectedValue(failure)
+      await expect(commands.lark(['im', '+chat-list'])).rejects.toBe(failure)
+      expect(run).toHaveBeenCalledTimes(1)
+    }
+    const commands = new Commands(() => deployment, env, new AbortController().signal)
+    const failure = new Error('connection reset')
+    const run = vi.spyOn(commands, 'run').mockRejectedValue(failure)
+    await expect(commands.lark(['im', '+chat-list'])).rejects.toBe(failure)
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+  it('propagates bot failure after fallback, without another retry', async () => {
+    const commands = new Commands(() => deployment, env, new AbortController().signal)
+    const run = vi.spyOn(commands, 'run')
+      .mockResolvedValueOnce(JSON.stringify({ ok: false, error: unsupported }))
+      .mockResolvedValueOnce('{"ok":false,"error":{"code":232011,"message":"not in chat"}}')
+    await expect(commands.lark(['im', '+chat-list'])).rejects.toMatchObject({ code: 232011, message: expect.stringContaining('Add the bot') })
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+  it('allows an explicit undefined environment override to keep reads bot-only', async () => {
+    vi.stubEnv('DSH_SUPERAGENT_FEISHU_USER_CLI', '/process/user-lark')
+    try {
+      const commands = new Commands(() => deployment, { DSH_SUPERAGENT_FEISHU_USER_CLI: undefined }, new AbortController().signal)
+      const run = vi.spyOn(commands, 'run').mockResolvedValue(success)
+      await commands.lark(['im', '+chat-list'])
+      expect(run.mock.calls[0]![0]).toBe(deployment.feishu!.cli)
+    } finally { vi.unstubAllEnvs() }
+  })
+})
+
 it('reports Feishu failures with their code and without command arguments', () => {
   const membership = commandError({stderr:'[page 1] fetching...\n'+JSON.stringify({error:{code:232011,message:'operator is not in the chat'}})})
   expect(membership).toMatchObject({ message: 'operator is not in the chat (232011)', code: 232011 })

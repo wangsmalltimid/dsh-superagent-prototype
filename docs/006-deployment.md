@@ -64,9 +64,19 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    The first command reads the app secret from standard input. Use a separate configuration directory: `lark-cli` allows one profile per app id, and your personal configuration may already contain a user login for that app.
 
-   The host refuses a CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
+   The host refuses a Source CLI that can act as a user. It reads the app id, Feishu/Lark brand and bot `open_id` from the bot configuration.
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
+
+### Optional user identity for host reads
+
+Set `DSH_SUPERAGENT_FEISHU_USER_CLI` in the host process environment to an absolute executable path for a separate, already-authorized user CLI wrapper, then restart the host. Use the same Feishu app and tenant as the bot, with a separate configuration directory. The wrapper must execute the real CLI, not the worker's `lark-cli` shim. Do not change the Source's bot-only CLI or its strict mode.
+
+The host prefers `--as user` for raw `api GET` calls and these IM read shortcuts: `+chat-list`, `+chat-members-list`, `+chat-messages-list`, `+messages-mget`, `+threads-messages-list`, and `+messages-resources-download`. All writes, message sends/replies, event subscriptions, and unclassified shortcuts still use the bot. With no user wrapper configured, behavior stays bot-only.
+
+A read falls back to the bot once only when the CLI explicitly rejects `--as user` as an unsupported identity before making a request. Missing scopes, missing/expired user authorization, strict-mode restrictions, API errors, and network failures are reported without changing identity. Raw API errors cannot reliably distinguish unsupported identity from invalid credentials, so they do not trigger fallback. If the bot attempt also fails, its error is returned; this does not necessarily mean neither identity supports the interface.
+
+First-time user consent, additional scopes, and consent revoked by the user still require the normal Feishu authorization flow. This option neither performs login nor grants another application access. It affects host `Commands.lark` operations only: workers' direct CLI commands remain bot-only. Supporting user-first commands in worker sessions requires a separate explicit execution policy and CLI routing change.
 
 ## Install
 
